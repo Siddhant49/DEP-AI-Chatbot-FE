@@ -1,0 +1,630 @@
+import { useRef, useState, useEffect, useContext, useLayoutEffect } from "react";
+import { DialogType, Stack } from "@fluentui/react";
+import uuid from 'react-uuid';
+
+import styles from "./Chat.module.css";
+import Logo_CNH_Industrial from "../../assets/Logo_CNH_Industrial.svg";
+// import { ReactComponent as Logo_CNH_Industrial } from "../../static/assets/Logo_CNH_Industrialsvg.svg";
+
+import {
+    ChatMessage,
+    ConversationRequest,
+    conversationApi,
+    Citation,
+    ToolMessageContent,
+    ChatResponse,
+    Conversation,
+    historyGenerate,
+    historyUpdate,
+    historyClear,
+    ChatHistoryLoadingState,
+    DBStatus,
+    ErrorMessage
+} from "../../api";
+import { ChatHistoryPanel } from "../../components/ChatHistory/ChatHistoryPanel";
+import { AppStateContext } from "../../state/AppProvider";
+import { useBoolean } from "@fluentui/react-hooks";
+import { AutenticationNotConfigured } from "../../components/AuthenticationNotConfigured";
+import { StartChatting } from "../../components/StartChatting";
+import { AiChatMessage } from "../../components/AiChatMessage/AiChatMessage";
+import { AiSectionInput } from "../../components/AiSectionInput/AiSectionInput";
+import { CitationPanel } from "../../components/CitationPanel";
+
+const enum messageStatus {
+    NotRunning = "Not Running",
+    Processing = "Processing",
+    Done = "Done"
+}
+
+const BlobImage = (props: object) => {
+    return <img {...props} style={{ maxWidth: "50vw" }} />;
+};
+
+export const setResponsiveItem = (item: string, value: string)=>{
+    sessionStorage.setItem(item, value);
+}
+
+const Chat = () => {
+    const appStateContext = useContext(AppStateContext)
+    const chatMessageStreamEnd = useRef<HTMLDivElement | null>(null);
+    const [isLoading, setIsLoading] = useState<boolean>(false);
+    const [showLoadingMessage, setShowLoadingMessage] = useState<boolean>(false);
+    const [activeCitation, setActiveCitation] = useState<[content: string, id: string, title: string, filepath: string, url: string, metadata: string]>();
+    const [isCitationPanelOpen, setIsCitationPanelOpen] = useState<boolean>(false);
+    const abortFuncs = useRef([] as AbortController[]);
+    const [showAuthMessage, setShowAuthMessage] = useState<boolean>(true);
+    const [messages, setMessages] = useState<ChatMessage[]>([])
+    const [processMessages, setProcessMessages] = useState<messageStatus>(messageStatus.NotRunning);
+    const [clearingChat, setClearingChat] = useState<boolean>(false);
+    const [hideErrorDialog, { toggle: toggleErrorDialog }] = useBoolean(true);
+    const [errorMsg, setErrorMsg] = useState<ErrorMessage | null>();
+    const [isMobile, setIsMobile] = useState(window.innerWidth < 768);
+    const [isTablet, setIsTablet] = useState(window.innerWidth >= 768 && window.innerWidth <= 1290);
+
+    function getWindowDimensions() {
+        const { innerWidth: width, innerHeight: height } = window;
+        return {
+          width,
+          height
+        };
+      }
+
+    const handleCitationPanelOpen = (isOpen : boolean) =>{
+        setResponsiveItem('isCitationPannel', isOpen.toString());
+        setIsCitationPanelOpen(isOpen); 
+    }
+
+    useEffect(() => {
+
+        function handleResize() {
+            let isWindowsMobile = getWindowDimensions().width < 768 ? true : false;
+            setIsMobile(isWindowsMobile);
+            let isWindowsTablet = getWindowDimensions().width >= 768 && getWindowDimensions().width <= 1440 ? true : false;
+            setIsTablet(isWindowsTablet);
+        }
+    
+        window.addEventListener('resize', handleResize);
+
+        return () => {
+            window.removeEventListener('resize', handleResize);
+        }
+      }, []);
+
+    const errorDialogContentProps = {
+        type: DialogType.close,
+        title: errorMsg?.title,
+        closeButtonAriaLabel: 'Close',
+        subText: errorMsg?.subtitle,
+    };
+
+    const modalProps = {
+        titleAriaId: 'labelId',
+        subtitleAriaId: 'subTextId',
+        isBlocking: true,
+        styles: { main: { maxWidth: 450 } },
+    }
+
+    useEffect(() => {
+        if (appStateContext?.state.isDBAvailable?.status === DBStatus.NotWorking && appStateContext.state.chatHistoryLoadingState === ChatHistoryLoadingState.Fail && hideErrorDialog) {
+            let subtitle = `${appStateContext.state.isDBAvailable.status}. Please contact the site administrator.`
+            setErrorMsg({
+                title: "Chat history is not enabled",
+                subtitle: subtitle
+            })
+            toggleErrorDialog();
+        }
+    }, [appStateContext?.state.isDBAvailable]);
+
+    const handleErrorDialogClose = () => {
+        toggleErrorDialog()
+        setTimeout(() => {
+            setErrorMsg(null)
+        }, 500);
+    }
+
+    const getUserInfoList = async () => {
+        // TODO: review the logic to manage SSO
+        // const userInfoList = await getUserInfo();
+        // if (userInfoList.length === 0 && window.location.hostname !== "127.0.0.1") {
+        //     setShowAuthMessage(true);
+        // }
+        // else {
+        //     setShowAuthMessage(false);
+        // }
+        setShowAuthMessage(false);
+    }
+
+    const makeApiRequestWithoutDB = async (question: string, conversationId?: string) => {
+        setIsLoading(true);
+        setShowLoadingMessage(true);
+        const abortController = new AbortController();
+        abortFuncs.current.unshift(abortController);
+
+        const userMessage: ChatMessage = {
+            id: uuid(),
+            role: "user",
+            content: question,
+            date: new Date().toISOString(),
+        };
+
+        let conversation: Conversation | null | undefined;
+        if (!conversationId) {
+            conversation = {
+                id: conversationId ?? uuid(),
+                title: question,
+                messages: [userMessage],
+                date: new Date().toISOString(),
+            }
+        } else {
+            conversation = appStateContext?.state?.currentChat
+            if (!conversation) {
+                console.error("Conversation not found.");
+                setIsLoading(false);
+                setShowLoadingMessage(false);
+                abortFuncs.current = abortFuncs.current.filter(a => a !== abortController);
+                return;
+            } else {
+                conversation.messages.push(userMessage);
+            }
+        }
+
+        appStateContext?.dispatch({ type: 'UPDATE_CURRENT_CHAT', payload: conversation });
+        setMessages(conversation.messages)
+
+        const request: ConversationRequest = {
+            messages: [...conversation.messages.filter((answer) => answer.role !== "error")]
+            // messages: [...conversation.messages.filter((answer) => answer.role === "error")]
+        };
+
+        let result = {} as ChatResponse;
+        try {
+            const response = await conversationApi(request, conversation.id, abortController.signal);
+            if (response?.body) {
+                const reader = response.body.getReader();
+                let runningText = "";
+
+                while (true) {
+                    setProcessMessages(messageStatus.Processing)
+                    const { done, value } = await reader.read();
+                    if (done) break;
+
+                    var text = new TextDecoder("utf-8").decode(value);
+                    const objects = text.split("\n");
+                    objects.forEach((obj) => {
+                        try {
+                            runningText += obj;
+                            result = JSON.parse(runningText);
+                            result.choices[0].messages.forEach((obj) => {
+                                obj.id = uuid();
+                                obj.date = new Date().toISOString();
+                            })
+                            setShowLoadingMessage(false);
+                            if (conversation?.id != null || conversation?.id != "undefined") {
+                                setMessages([...messages, userMessage, ...result.choices[0].messages]);
+                            } else {
+                                setMessages([...messages, ...result.choices[0].messages]);
+                            }
+                            runningText = "";
+                        }
+                        catch { }
+                    });
+                }
+                conversation.messages.push(...result.choices[0].messages)
+                appStateContext?.dispatch({ type: 'UPDATE_CURRENT_CHAT', payload: conversation });
+                setMessages([...messages, ...result.choices[0].messages]);
+            }
+
+        } catch (e) {
+            if (!abortController.signal.aborted) {
+                let errorMessage = "An error occurred. Please try again. If the problem persists, please contact the site administrator.";
+                if (result.error?.message) {
+                    errorMessage = result.error.message;
+                }
+                else if (typeof result.error === "string") {
+                    errorMessage = result.error;
+                }
+                let errorChatMsg: ChatMessage = {
+                    id: uuid(),
+                    role: "error",
+                    content: errorMessage,
+                    date: new Date().toISOString()
+                }
+                conversation.messages.push(errorChatMsg);
+                appStateContext?.dispatch({ type: 'UPDATE_CURRENT_CHAT', payload: conversation });
+                setMessages([...messages, errorChatMsg]);
+            } else {
+                setMessages([...messages, userMessage])
+            }
+        } finally {
+            setIsLoading(false);
+            setShowLoadingMessage(false);
+            abortFuncs.current = abortFuncs.current.filter(a => a !== abortController);
+            setProcessMessages(messageStatus.Done)
+        }
+
+        return abortController.abort();
+    };
+
+    const makeApiRequestWithDB = async (question: string, conversationId?: string) => {
+        setIsLoading(true);
+        setShowLoadingMessage(true);
+        const abortController = new AbortController();
+        abortFuncs.current.unshift(abortController);
+
+        const userMessage: ChatMessage = {
+            id: uuid(),
+            role: "user",
+            content: question,
+            date: new Date().toISOString(),
+        };
+
+        //api call params set here (generate)
+        let request: ConversationRequest;
+        let conversation;
+        if (conversationId) {
+            conversation = appStateContext?.state?.chatHistory?.find((conv) => conv.id === conversationId)
+            if (!conversation) {
+                console.error("Conversation not found.");
+                setIsLoading(false);
+                setShowLoadingMessage(false);
+                abortFuncs.current = abortFuncs.current.filter(a => a !== abortController);
+                return;
+            } else {
+                conversation.messages.push(userMessage);
+                request = {
+                    messages: [...conversation.messages.filter((answer) => answer.role !== "error")]
+                };
+            }
+        } else {
+            request = {
+                messages: [userMessage].filter((answer) => answer.role !== "error")
+            };
+            setMessages(request.messages)
+        }
+        let result = {} as ChatResponse;
+        try {
+            const response = conversationId ? await historyGenerate(request, abortController.signal, conversationId) : await historyGenerate(request, abortController.signal);
+            if (!response?.ok) {
+                let errorChatMsg: ChatMessage = {
+                    id: uuid(),
+                    role: "error",
+                    content: "There was an error generating a response. Chat history can't be saved at this time. If the problem persists, please contact the site administrator.",
+                    date: new Date().toISOString()
+                }
+                let resultConversation;
+                if (conversationId) {
+                    resultConversation = appStateContext?.state?.chatHistory?.find((conv) => conv.id === conversationId)
+                    if (!resultConversation) {
+                        console.error("Conversation not found.");
+                        setIsLoading(false);
+                        setShowLoadingMessage(false);
+                        abortFuncs.current = abortFuncs.current.filter(a => a !== abortController);
+                        return;
+                    }
+                    resultConversation.messages.push(errorChatMsg);
+                } else {
+                    setMessages([...messages, userMessage, errorChatMsg])
+                    setIsLoading(false);
+                    setShowLoadingMessage(false);
+                    abortFuncs.current = abortFuncs.current.filter(a => a !== abortController);
+                    return;
+                }
+                appStateContext?.dispatch({ type: 'UPDATE_CURRENT_CHAT', payload: resultConversation });
+                setMessages([...resultConversation.messages]);
+                return;
+            }
+            if (response?.body) {
+                const reader = response.body.getReader();
+                let runningText = "";
+
+                while (true) {
+                    setProcessMessages(messageStatus.Processing)
+                    const { done, value } = await reader.read();
+                    if (done) break;
+
+                    var text = new TextDecoder("utf-8").decode(value);
+                    const objects = text.split("\n");
+                    objects.forEach((obj) => {
+                        try {
+                            runningText += obj;
+                            result = JSON.parse(runningText);
+                            result.choices[0].messages.forEach((obj) => {
+                                obj.id = uuid();
+                                obj.date = new Date().toISOString();
+                            })
+                            setShowLoadingMessage(false);
+                            if (!conversationId) {
+                                setMessages([...messages, userMessage, ...result.choices[0].messages]);
+                            } else {
+                                setMessages([...messages, ...result.choices[0].messages]);
+                            }
+                            runningText = "";
+                        }
+                        catch { }
+                    });
+                }
+
+                let resultConversation;
+                if (conversationId) {
+                    resultConversation = appStateContext?.state?.chatHistory?.find((conv) => conv.id === conversationId)
+                    if (!resultConversation) {
+                        console.error("Conversation not found.");
+                        setIsLoading(false);
+                        setShowLoadingMessage(false);
+                        abortFuncs.current = abortFuncs.current.filter(a => a !== abortController);
+                        return;
+                    }
+                    resultConversation.messages.push(...result.choices[0].messages);
+                } else {
+                    resultConversation = {
+                        id: result.history_metadata.conversation_id,
+                        title: result.history_metadata.title,
+                        messages: [userMessage],
+                        date: result.history_metadata.date
+                    }
+                    resultConversation.messages.push(...result.choices[0].messages);
+                }
+                if (!resultConversation) {
+                    setIsLoading(false);
+                    setShowLoadingMessage(false);
+                    abortFuncs.current = abortFuncs.current.filter(a => a !== abortController);
+                    return;
+                }
+                appStateContext?.dispatch({ type: 'UPDATE_CURRENT_CHAT', payload: resultConversation });
+                setMessages([...messages, ...result.choices[0].messages]);
+            }
+
+        } catch (e) {
+            if (!abortController.signal.aborted) {
+                let errorMessage = "An error occurred. Please try again. If the problem persists, please contact the site administrator.";
+                if (result.error?.message) {
+                    errorMessage = result.error.message;
+                }
+                else if (typeof result.error === "string") {
+                    errorMessage = result.error;
+                }
+                let errorChatMsg: ChatMessage = {
+                    id: uuid(),
+                    role: "error",
+                    content: errorMessage,
+                    date: new Date().toISOString()
+                }
+                let resultConversation;
+                if (conversationId) {
+                    resultConversation = appStateContext?.state?.chatHistory?.find((conv) => conv.id === conversationId)
+                    if (!resultConversation) {
+                        console.error("Conversation not found.");
+                        setIsLoading(false);
+                        setShowLoadingMessage(false);
+                        abortFuncs.current = abortFuncs.current.filter(a => a !== abortController);
+                        return;
+                    }
+                    resultConversation.messages.push(errorChatMsg);
+                } else {
+                    if (!result.history_metadata) {
+                        console.error("Error retrieving data.", result);
+                        setIsLoading(false);
+                        setShowLoadingMessage(false);
+                        abortFuncs.current = abortFuncs.current.filter(a => a !== abortController);
+                        return;
+                    }
+                    resultConversation = {
+                        id: result.history_metadata.conversation_id,
+                        title: result.history_metadata.title,
+                        messages: [userMessage],
+                        date: result.history_metadata.date
+                    }
+                    resultConversation.messages.push(errorChatMsg);
+                }
+                if (!resultConversation) {
+                    setIsLoading(false);
+                    setShowLoadingMessage(false);
+                    abortFuncs.current = abortFuncs.current.filter(a => a !== abortController);
+                    return;
+                }
+                appStateContext?.dispatch({ type: 'UPDATE_CURRENT_CHAT', payload: resultConversation });
+                setMessages([...messages, errorChatMsg]);
+            } else {
+                setMessages([...messages, userMessage])
+            }
+        } finally {
+            setIsLoading(false);
+            setShowLoadingMessage(false);
+            abortFuncs.current = abortFuncs.current.filter(a => a !== abortController);
+            setProcessMessages(messageStatus.Done)
+        }
+        return abortController.abort();
+
+    }
+
+    const clearChat = async () => {
+        setClearingChat(true)
+        let response = null
+        if (appStateContext?.state.currentChat?.id) {
+            if (appStateContext?.state.isDBAvailable.DB) {
+                response = await historyClear(appStateContext?.state.currentChat.id)
+            }
+            if (appStateContext?.state.isDBAvailable.DB && response != null && !response.ok) {
+                setErrorMsg({
+                    title: "Error clearing current chat",
+                    subtitle: "Please try again. If the problem persists, please contact the site administrator.",
+                })
+                toggleErrorDialog();
+            }
+            else {
+                appStateContext?.dispatch({ type: 'DELETE_CURRENT_CHAT_MESSAGES', payload: appStateContext?.state.currentChat.id });
+                appStateContext?.dispatch({ type: 'UPDATE_CHAT_HISTORY', payload: appStateContext?.state.currentChat });
+                setActiveCitation(undefined);
+                setIsCitationPanelOpen(false);
+                setMessages([])
+            }
+        }
+        setClearingChat(false)
+    };
+
+    const newChat = () => {
+        setProcessMessages(messageStatus.Processing)
+        setMessages([])
+        setIsCitationPanelOpen(false);
+        setActiveCitation(undefined);
+        appStateContext?.dispatch({ type: 'UPDATE_CURRENT_CHAT', payload: null });
+        setProcessMessages(messageStatus.Done)
+    };
+
+    const stopGenerating = () => {
+        abortFuncs.current.forEach(a => a.abort());
+        setShowLoadingMessage(false);
+        setIsLoading(false);
+    }
+
+    const parseCitationFromMessage = (message: ChatMessage) => {
+        if (message?.role && message?.role === "tool") {
+            try {
+                const toolMessage = JSON.parse(message.content) as ToolMessageContent;
+                return toolMessage.citations;
+            }
+            catch {
+                return [];
+            }
+        }
+        return [];
+    }
+
+    useEffect(() => {
+        if (appStateContext?.state.currentChat) {
+
+            setMessages(appStateContext.state.currentChat.messages)
+        } else {
+            setMessages([])
+        }
+    }, [appStateContext?.state.currentChat]);
+
+    useLayoutEffect(() => {
+        const saveToDB = async (messages: ChatMessage[], id: string) => {
+            const response = await historyUpdate(messages, id)
+            return response
+        }
+
+        if (appStateContext && appStateContext.state.currentChat && processMessages === messageStatus.Done) {
+            if (appStateContext.state.isDBAvailable.DB) {
+                if (!appStateContext?.state.currentChat?.messages) {
+                    console.error("Failure fetching current chat state.")
+                    return
+                }
+                saveToDB(appStateContext.state.currentChat.messages, appStateContext.state.currentChat.id)
+                    .then((res) => {
+                        if (!res.ok) {
+                            let errorMessage = "An error occurred. Answers can't be saved at this time. If the problem persists, please contact the site administrator.";
+                            let errorChatMsg: ChatMessage = {
+                                id: uuid(),
+                                role: "error",
+                                content: errorMessage,
+                                date: new Date().toISOString()
+                            }
+                            if (!appStateContext?.state.currentChat?.messages) {
+                                let err: Error = {
+                                    ...new Error,
+                                    message: "Failure fetching current chat state."
+                                }
+                                throw err
+                            }
+                            setMessages([...appStateContext?.state.currentChat?.messages, errorChatMsg])
+                        }
+                        return res as Response
+                    })
+                    .catch((err) => {
+                        console.error("Error: ", err)
+                        let errRes: Response = {
+                            ...new Response,
+                            ok: false,
+                            status: 500,
+                        }
+                        return errRes;
+                    })
+            } else {
+            }
+            appStateContext?.dispatch({ type: 'UPDATE_CHAT_HISTORY', payload: appStateContext.state.currentChat });
+            setMessages(appStateContext.state.currentChat.messages)
+            setProcessMessages(messageStatus.NotRunning)
+        }
+    }, [processMessages]);
+
+    useEffect(() => {
+        getUserInfoList();
+    }, []);
+
+    useLayoutEffect(() => {
+        chatMessageStreamEnd.current?.scrollIntoView({ behavior: "smooth", block: 'nearest', inline: 'start' })
+    }, [showLoadingMessage, processMessages]);
+
+    const onShowCitation = (citation: Citation) => {
+        setActiveCitation([citation.content, citation.id, citation.title ?? "", citation.filepath ?? "", citation.url ?? "", ""]);
+        setIsCitationPanelOpen(true);
+        setResponsiveItem('isCitationPannel', 'true');
+    };
+
+    const disabledButton = () => {
+        return isLoading || (messages && messages.length === 0) || clearingChat || appStateContext?.state.chatHistoryLoadingState === ChatHistoryLoadingState.Loading
+    }
+
+    {/**** Responsive *****/}
+    const NormalView = () => {
+        return <Stack horizontal className={styles.chatRoot}>
+                    <div className={styles.chatContainer}>
+                            {!messages || messages.length < 1 ? <StartChatting /> : 
+                                (<div className={styles.chatMessageStream} style={{ marginBottom: isLoading ? "40px" : "0px" }} role="log">
+                                    <AiChatMessage messages={messages} onShowCitation={onShowCitation} parseCitationFromMessage={parseCitationFromMessage} showLoadingMessage={showLoadingMessage} ></AiChatMessage>
+                                    <div ref={chatMessageStreamEnd} />
+                                </div>
+                            )}
+                            <AiSectionInput isLoading={isLoading} stopGenerating={stopGenerating} appStateContext={appStateContext} newChat={newChat} disabledButton={disabledButton} clearChat={clearChat} hideErrorDialog={hideErrorDialog} handleErrorDialogClose={handleErrorDialogClose} errorDialogContentProps={errorDialogContentProps} modalProps={modalProps} makeApiRequestWithDB={makeApiRequestWithDB} makeApiRequestWithoutDB={makeApiRequestWithoutDB} />
+                        </div>
+                        <CitationPanel messages={messages} isCitationPanelOpen={isCitationPanelOpen} activeCitation={activeCitation} setIsCitationPanelOpen={handleCitationPanelOpen} blob={BlobImage} />
+                    </Stack>
+    }
+
+    const TabletView = () => {
+        return <Stack horizontal className={styles.chatRoot}>
+                    {!(sessionStorage.getItem('isCitationPannel') === 'true' && sessionStorage.getItem('isChatHistory') === 'true')&&<div className={styles.chatContainer}>
+                        {!messages || messages.length < 1 ? <StartChatting /> : 
+                            (<div className={styles.chatMessageStream} style={{ marginBottom: isLoading ? "40px" : "0px" }} role="log">
+                                <AiChatMessage messages={messages} onShowCitation={onShowCitation} parseCitationFromMessage={parseCitationFromMessage} showLoadingMessage={showLoadingMessage} ></AiChatMessage>
+                                <div ref={chatMessageStreamEnd} />
+                            </div>
+                        )}
+                        <AiSectionInput isLoading={isLoading} stopGenerating={stopGenerating} appStateContext={appStateContext} newChat={newChat} disabledButton={disabledButton} clearChat={clearChat} hideErrorDialog={hideErrorDialog} handleErrorDialogClose={handleErrorDialogClose} errorDialogContentProps={errorDialogContentProps} modalProps={modalProps} makeApiRequestWithDB={makeApiRequestWithDB} makeApiRequestWithoutDB={makeApiRequestWithoutDB} />
+                    </div>}
+                    {(sessionStorage.getItem('isCitationPannel') === 'true') && <CitationPanel messages={messages} isCitationPanelOpen={isCitationPanelOpen} activeCitation={activeCitation} setIsCitationPanelOpen={handleCitationPanelOpen} blob={BlobImage} />}
+                </Stack>
+    }
+
+    const MobileView = () => {
+        return <Stack horizontal className={styles.chatRoot}>
+                        {(sessionStorage.getItem('isCitationPannel') !== 'true' && sessionStorage.getItem('isChatHistory') !== 'true') && <div className={styles.chatContainer}>
+                            {!messages || messages.length < 1 ? <StartChatting /> : 
+                                (<div className={styles.chatMessageStream} style={{ marginBottom: isLoading ? "40px" : "0px" }} role="log">
+                                    <AiChatMessage messages={messages} onShowCitation={onShowCitation} parseCitationFromMessage={parseCitationFromMessage} showLoadingMessage={showLoadingMessage} ></AiChatMessage>
+                                    <div ref={chatMessageStreamEnd} />
+                                </div>
+                            )}
+                            <AiSectionInput isLoading={isLoading} stopGenerating={stopGenerating} appStateContext={appStateContext} newChat={newChat} disabledButton={disabledButton} clearChat={clearChat} hideErrorDialog={hideErrorDialog} handleErrorDialogClose={handleErrorDialogClose} errorDialogContentProps={errorDialogContentProps} modalProps={modalProps} makeApiRequestWithDB={makeApiRequestWithDB} makeApiRequestWithoutDB={makeApiRequestWithoutDB} />
+                        </div>}
+                        {(sessionStorage.getItem('isCitationPannel') === 'true' && sessionStorage.getItem('isChatHistory') !== 'true') && <CitationPanel messages={messages} isCitationPanelOpen={isCitationPanelOpen} activeCitation={activeCitation} setIsCitationPanelOpen={handleCitationPanelOpen} blob={BlobImage} />}
+                    </Stack>
+    }
+
+
+    return (
+        <div className={styles.container} role="main">
+            {showAuthMessage ? <AutenticationNotConfigured /> : <>
+                    {!isMobile && !isTablet && <NormalView /> }
+                    {!isMobile && !isTablet && (appStateContext?.state.isChatHistoryOpen && appStateContext?.state.isDBAvailable?.status !== DBStatus.NotConfigured) && <ChatHistoryPanel />}
+                    {isTablet && <TabletView />}
+                    {isMobile && <MobileView />}
+                    {(isMobile || isTablet) &&(sessionStorage.getItem('isChatHistory') === 'true') && (appStateContext?.state.isChatHistoryOpen && appStateContext?.state.isDBAvailable?.status !== DBStatus.NotConfigured) && <ChatHistoryPanel />}
+            </>}
+        </div>
+    );
+};
+
+export default Chat;

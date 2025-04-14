@@ -1,0 +1,81 @@
+.citationPanel {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    padding: 0px 16px;
+    gap: 8px;
+    background: #FFFFFF;
+    box-shadow: 0px 2px 4px rgba(0, 0, 0, 0.14), 0px 0px 2px rgba(0, 0, 0, 0.12);
+    border-radius: 8px;
+    flex: auto;
+    order: 0;
+    align-self: stretch;
+    flex-grow: 0.3;
+    max-width: 55%;
+    overflow-y: scroll;
+    max-height: calc(100vh - 100px);
+}
+
+.citationPanelHeaderContainer {
+    width: 100%;
+    position: sticky;
+    top: 0;
+    background: white;
+    padding: 5px 0;
+}
+
+.citationPanelHeader {
+    font-style: normal;
+    font-weight: 600;
+    font-size: 18px;
+    line-height: 24px;
+    color: #000000;
+    flex: none;
+    order: 0;
+    flex-grow: 0;
+}
+
+.citationPanelTitle {
+    font-style: normal;
+    font-weight: 600;
+    font-size: 16px;
+    line-height: 22px;
+    color: #323130;
+    margin-top: 12px;
+    margin-bottom: 12px;
+}
+
+.citationPanelContent {
+    font-style: normal;
+    font-weight: 400;
+    font-size: 14px;
+    line-height: 20px;
+    color: #000000;
+    flex: none;
+    order: 1;
+    align-self: stretch;
+    flex-grow: 0;
+} 
+
+.externalLink{
+    color: #000000;
+    text-decoration: none;
+    font-size: 16px;
+    font-weight: 300;
+    transition: all .2s linear;
+}
+
+.externalLink:hover {
+    color: #a32428;
+    font-weight: 400;
+    cursor: pointer;
+    text-decoration: underline;
+    transition: all .2s linear;
+}
+
+@media only screen and (max-width: 768px) {
+    .citationPanel {
+        max-width: 100%;
+        width: 100%;
+    }
+}

@@ -1,0 +1,362 @@
+import { UserInfo, ConversationRequest, Conversation, ChatMessage, DBHealth, DBStatus } from "./models";
+import { chatHistorySampleData } from "../constants/chatHistory";
+
+const BASE_URL = import.meta.env.VITE_BASE_URL ? import.meta.env.VITE_BASE_URL : "";
+const USER_ID = sessionStorage.getItem('userId');
+
+
+export async function conversationApi(options: ConversationRequest, conversation_id: string, abortSignal: AbortSignal): Promise<Response> {
+    const response = await fetch(BASE_URL + "/conversation", {
+        method: "POST",
+        headers: {
+            "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+            conversation_id: conversation_id,
+            messages: options.messages
+        }),
+        signal: abortSignal
+    });
+
+    return response;
+}
+
+export async function getUserInfo(): Promise<UserInfo[]> {
+    const response = await fetch(BASE_URL + '/.auth/me');
+    if (!response.ok) {
+        console.log("No identity provider found. Access to chat will be blocked.")
+        return [];
+    }
+
+    const payload = await response.json();
+    return payload;
+}
+
+// export const fetchChatHistoryInit = async (): Promise<Conversation[] | null> => {
+export const fetchChatHistoryInit = (): Conversation[] | null => {
+    // Make initial API call here
+
+    // return null;
+    return chatHistorySampleData;
+}
+
+export const historyList = async (): Promise<Conversation[] | null> => {
+    let headers: { [key: string]: string } = { };
+
+    if (USER_ID) {
+        headers['X-User-ID'] = USER_ID;
+    }
+    const response = await fetch(BASE_URL + "/history/list", {
+        method: "GET",
+        headers: headers
+    }).then(async (res) => {
+        const payload = await res.json();
+        if (!Array.isArray(payload)) {
+            console.error("There was an issue fetching your data.");
+            return [];
+        }
+        const conversations: Conversation[] = await Promise.all(payload.map(async (conv: any) => {
+            let convMessages: ChatMessage[] = [];
+            convMessages = await historyRead(conv.id)
+            .then((res) => {
+                return res
+            })
+            .catch((err) => {
+                console.error("error fetching messages: ", err)
+                return []
+            })
+            const conversation: Conversation = {
+                id: conv.id,
+                title: conv.title,
+                date: conv.createdAt,
+                messages: convMessages
+            };
+            return conversation;
+        }));
+        return conversations;
+    }).catch((err) => {
+        console.error("There was an issue fetching your data.");
+        return null
+    })
+
+    return response
+}
+
+export const historyRead = async (convId: string): Promise<ChatMessage[]> => {
+    let headers: { [key: string]: string } = {
+        "Content-Type": "application/json"
+    };
+
+    if (USER_ID) {
+        headers['X-User-ID'] = USER_ID;
+    }
+
+    const response = await fetch(BASE_URL + "/history/read", {
+        method: "POST",
+        body: JSON.stringify({
+            conversation_id: convId
+        }),
+        headers: headers
+    })
+    .then(async (res) => {
+        if(!res){
+            return []
+        }
+        const payload = await res.json();
+        let messages: ChatMessage[] = [];
+        if(payload?.messages){
+            payload.messages.forEach((msg: any) => {
+                const message: ChatMessage = {
+                    id: msg.id,
+                    role: msg.role,
+                    date: msg.createdAt,
+                    content: msg.content,
+                }
+                messages.push(message)
+            });
+        }
+        return messages;
+    }).catch((err) => {
+        console.error("There was an issue fetching your data.");
+        return []
+    })
+    return response
+}
+
+export const historyGenerate = async (options: ConversationRequest, abortSignal: AbortSignal, convId?: string): Promise<Response> => {
+    let headers: { [key: string]: string } = {
+        "Content-Type": "application/json"
+    };
+
+    if (USER_ID) {
+        headers['X-User-ID'] = USER_ID;
+    }
+
+    let body;
+    if(convId){
+        body = JSON.stringify({
+            conversation_id: convId,
+            messages: options.messages
+        })
+    }else{
+        body = JSON.stringify({
+            messages: options.messages
+        })
+    }
+    const response = await fetch(BASE_URL + "/history/generate", {
+        method: "POST",
+        headers: headers,
+        body: body,
+        signal: abortSignal
+    }).then((res) => {
+        return res
+    })
+    .catch((err) => {
+        console.error("There was an issue fetching your data.");
+        return new Response;
+    })
+    return response
+}
+
+export const historyUpdate = async (messages: ChatMessage[], convId: string): Promise<Response> => {
+    let headers: { [key: string]: string } = {
+        "Content-Type": "application/json"
+    };
+
+    if (USER_ID) {
+        headers['X-User-ID'] = USER_ID;
+    }
+
+    const response = await fetch(BASE_URL + "/history/update", {
+        method: "POST",
+        body: JSON.stringify({
+            conversation_id: convId,
+            messages: messages
+        }),
+        headers: headers
+    }).then(async (res) => {
+        return res
+    })
+    .catch((err) => {
+        console.error("There was an issue fetching your data.");
+        let errRes: Response = {
+            ...new Response,
+            ok: false,
+            status: 500,
+        }
+        return errRes;
+    })
+    return response
+}
+
+export const historyDelete = async (convId: string) : Promise<Response> => {
+    let headers: { [key: string]: string } = {
+        "Content-Type": "application/json"
+    };
+
+    if (USER_ID) {
+        headers['X-User-ID'] = USER_ID;
+    }
+
+    const response = await fetch(BASE_URL + "/history/delete", {
+        method: "DELETE",
+        body: JSON.stringify({
+            conversation_id: convId,
+        }),
+        headers: headers
+    })
+    .then((res) => {
+        return res
+    })
+    .catch((err) => {
+        console.error("There was an issue fetching your data.");
+        let errRes: Response = {
+            ...new Response,
+            ok: false,
+            status: 500,
+        }
+        return errRes;
+    })
+    return response;
+}
+
+export const historyDeleteAll = async () : Promise<Response> => {
+    let headers: { [key: string]: string } = {
+        "Content-Type": "application/json"
+    };
+
+    if (USER_ID) {
+        headers['X-User-ID'] = USER_ID;
+    }
+
+    const response = await fetch(BASE_URL + "/history/delete_all", {
+        method: "DELETE",
+        body: JSON.stringify({}),
+        headers: headers
+    })
+    .then((res) => {
+        return res
+    })
+    .catch((err) => {
+        console.error("There was an issue fetching your data.");
+        let errRes: Response = {
+            ...new Response,
+            ok: false,
+            status: 500,
+        }
+        return errRes;
+    })
+    return response;
+}
+
+export const historyClear = async (convId: string) : Promise<Response> => {
+    let headers: { [key: string]: string } = {
+        "Content-Type": "application/json"
+    };
+
+    if (USER_ID) {
+        headers['X-User-ID'] = USER_ID;
+    }
+
+    const response = await fetch(BASE_URL + "/history/clear", {
+        method: "POST",
+        body: JSON.stringify({
+            conversation_id: convId,
+        }),
+        headers: headers
+    })
+    .then((res) => {
+        return res
+    })
+    .catch((err) => {
+        console.error("There was an issue fetching your data.");
+        let errRes: Response = {
+            ...new Response,
+            ok: false,
+            status: 500,
+        }
+        return errRes;
+    })
+    return response;
+}
+
+export const historyRename = async (convId: string, title: string) : Promise<Response> => {
+    let headers: { [key: string]: string } = {
+        "Content-Type": "application/json"
+    };
+
+    if (USER_ID) {
+        headers['X-User-ID'] = USER_ID;
+    }
+
+    const response = await fetch(BASE_URL + "/history/rename", {
+        method: "POST",
+        body: JSON.stringify({
+            conversation_id: convId,
+            title: title
+        }),
+        headers: headers
+    })
+    .then((res) => {
+        return res
+    })
+    .catch((err) => {
+        console.error("There was an issue fetching your data.");
+        let errRes: Response = {
+            ...new Response,
+            ok: false,
+            status: 500,
+        }
+        return errRes;
+    })
+    return response;
+}
+
+export const historyEnsure = async (): Promise<DBHealth> => {
+    const response = await fetch(BASE_URL + "/history/ensure", {
+        method: "GET",
+    })
+    .then(async res => {
+        let respJson = await res.json();
+        let formattedResponse;
+        if(respJson.message){
+            formattedResponse = DBStatus.Working
+        }else{
+            if(res.status === 500){
+                formattedResponse = DBStatus.NotWorking
+            }else{
+                formattedResponse = DBStatus.NotConfigured
+            }
+        }
+        if(!res.ok){
+            return {
+                DB: false,
+                status: formattedResponse
+            }
+        }else{
+            return {
+                DB: true,
+                status: formattedResponse
+            }
+        }
+    })
+    .catch((err) => {
+        console.error("There was an issue fetching your data.");
+        return {
+            DB: false,
+            status: err
+        }
+    })
+    return response;
+}
+
+// export async function getCitationSasToken(): Promise<Response> {
+//     const response = await fetch(BASE_URL + "/citation/token", {
+//         method: "GET",
+//         headers: {
+//             "Content-Type": "application/json"
+//         }
+//     });
+
+//     return response;
+// }
